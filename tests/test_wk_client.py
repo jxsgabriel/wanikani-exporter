@@ -2,28 +2,29 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import MagicMock
 
-import requests
-
-from wanikani_exporter.wk_client import WaniKaniAPIError, WaniKaniClient
+from wanikani_exporter.wk_client import (
+    WaniKaniAPIError,
+    WaniKaniClient,
+    _SimpleResponse,
+)
 
 
 def _mock_response(
     status_code: int = 200,
     json_data: dict | None = None,
     headers: dict[str, str] | None = None,
-) -> requests.Response:
-    resp = MagicMock(spec=requests.Response)
-    resp.status_code = status_code
-    resp.ok = 200 <= status_code < 300
-    resp.headers = headers or {}
-    resp.json.return_value = json_data or {}
-    resp.text = str(json_data or "")
-    return resp
+) -> _SimpleResponse:
+    return _SimpleResponse(
+        status_code=status_code,
+        text=json.dumps(json_data or {}),
+        headers=headers or {},
+    )
 
 
 class TestWaniKaniClient(unittest.TestCase):
@@ -32,7 +33,7 @@ class TestWaniKaniClient(unittest.TestCase):
             WaniKaniClient("   ")
 
     def test_fetch_paginated_follows_next_url(self) -> None:
-        session = MagicMock(spec=requests.Session)
+        session = MagicMock()
         session.headers = {}
         page1 = _mock_response(
             200,
@@ -72,7 +73,7 @@ class TestWaniKaniClient(unittest.TestCase):
         self.assertIsNone(session.get.call_args_list[1].kwargs["params"])
 
     def test_retries_on_429_rate_limit(self) -> None:
-        session = MagicMock(spec=requests.Session)
+        session = MagicMock()
         session.headers = {}
         rate_limited = _mock_response(
             429,
@@ -100,7 +101,7 @@ class TestWaniKaniClient(unittest.TestCase):
         self.assertEqual(slept, [2.0])
 
     def test_raises_api_error_on_unauthorized(self) -> None:
-        session = MagicMock(spec=requests.Session)
+        session = MagicMock()
         session.headers = {}
         session.get.return_value = _mock_response(401, {"error": "Unauthorized"})
 
@@ -110,7 +111,7 @@ class TestWaniKaniClient(unittest.TestCase):
         self.assertEqual(ctx.exception.status_code, 401)
 
     def test_fetch_vocabulary_subjects_uses_incremental_cache(self) -> None:
-        session = MagicMock(spec=requests.Session)
+        session = MagicMock()
         session.headers = {}
         initial_resp = _mock_response(
             200,
@@ -162,7 +163,7 @@ class TestWaniKaniClient(unittest.TestCase):
             )
 
     def test_fetch_assignments_filters_by_min_srs_stage(self) -> None:
-        session = MagicMock(spec=requests.Session)
+        session = MagicMock()
         session.headers = {}
         session.get.return_value = _mock_response(
             200,

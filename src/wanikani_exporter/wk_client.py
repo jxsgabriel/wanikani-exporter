@@ -2,12 +2,20 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 import json
 import logging
 from pathlib import Path
 import time
 from typing import Any, Callable
-import requests
+import urllib.error
+import urllib.parse
+import urllib.request
+
+try:
+    import requests  # type: ignore[import-not-found]
+except ImportError:
+    requests = None
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +33,64 @@ class WaniKaniAPIError(Exception):
         self.message = message
 
 
+@dataclass
+class _SimpleResponse:
+    """Lightweight HTTP response compatible with the subset of `requests.Response` used."""
+
+    status_code: int
+    text: str
+    headers: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def ok(self) -> bool:
+        return 200 <= self.status_code < 300
+
+    def json(self) -> dict[str, Any]:
+        return json.loads(self.text)
+
+
+class _UrllibSession:
+    """Standard-library HTTP session fallback when `requests` is not installed."""
+
+    def __init__(self) -> None:
+        self.headers: dict[str, str] = {}
+
+    def get(
+        self,
+        url: str,
+        params: dict[str, Any] | None = None,
+        timeout: float = 30.0,
+    ) -> _SimpleResponse:
+        full_url = url
+        if params:
+            query_string = urllib.parse.urlencode(params)
+            separator = "&" if "?" in full_url else "?"
+            full_url = f"{full_url}{separator}{query_string}"
+
+        req = urllib.request.Request(full_url, headers=dict(self.headers), method="GET")
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                body = resp.read().decode("utf-8", errors="replace")
+                resp_headers = {k: v for k, v in resp.headers.items()}
+                return _SimpleResponse(
+                    status_code=resp.status,
+                    text=body,
+                    headers=resp_headers,
+                )
+        except urllib.error.HTTPError as exc:
+            body = (
+                exc.read().decode("utf-8", errors="replace")
+                if exc.fp is not None
+                else str(exc)
+            )
+            resp_headers = {k: v for k, v in exc.headers.items()} if exc.headers else {}
+            return _SimpleResponse(
+                status_code=exc.code,
+                text=body,
+                headers=resp_headers,
+            )
+
+
 class WaniKaniClient:
     """Client for interacting with WaniKani API v2 endpoints."""
 
@@ -32,7 +98,7 @@ class WaniKaniClient:
         self,
         api_token: str,
         base_url: str = DEFAULT_BASE_URL,
-        session: requests.Session | None = None,
+        session: Any | None = None,
         max_retries: int = 3,
         sleep_fn: Callable[[float], None] = time.sleep,
         timeout: float = 30.0,
@@ -45,7 +111,12 @@ class WaniKaniClient:
         self.max_retries = max_retries
         self.sleep_fn = sleep_fn
         self.timeout = timeout
-        self.session = session or requests.Session()
+        if session is not None:
+            self.session = session
+        elif requests is not None:
+            self.session = requests.Session()
+        else:
+            self.session = _UrllibSession()
         self.session.headers.update(
             {
                 "Authorization": f"Bearer {self.api_token}",
@@ -86,16 +157,20 @@ class WaniKaniClient:
             return response.json()
 
     @staticmethod
-    def _compute_rate_limit_wait(response: requests.Response) -> float:
+    def _compute_rate_limit_wait(response: Any) -> float:
         """Determine how many seconds to wait from RateLimit-Reset or Retry-After headers."""
-        retry_after = response.headers.get("Retry-After")
+        headers = getattr(response, "headers", {}) or {}
+        # Case-insensitive header lookup
+        lower_headers = {str(k).lower(): v for k, v in headers.items()}
+
+        retry_after = lower_headers.get("retry-after")
         if retry_after:
             try:
                 return max(1.0, float(retry_after))
             except ValueError:
                 pass
 
-        reset_ts = response.headers.get("RateLimit-Reset")
+        reset_ts = lower_headers.get("ratelimit-reset")
         if reset_ts:
             try:
                 delta = float(reset_ts) - time.time()
